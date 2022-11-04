@@ -1,0 +1,543 @@
+---
+title: "Sci Reports mixed genotypes resist disease"
+author: "Anya Brown"
+date: "11/04/22"
+output: 
+  html_document: 
+    fig_height: 10
+    fig_width: 10
+---
+Coral health statuses were monitored for disease in the CCMI nursery 
+Dataset is located in Dryad: 
+Brown, Anya et al. (2022), CCMI nursery coral disease 2019, Dryad, Dataset, https://doi.org/10.25338/B8F643
+
+```{r setup, warning = FALSE, message = FALSE, results = FALSE}
+library(tidyr)
+library(dplyr)
+library(reshape2)
+library(plyr)
+library(ggplot2)
+library(Rmisc)
+library(stringr)
+library(lme4)
+library(lmerTest)
+library(cowplot)
+library(patchwork)
+library(viridis)
+library(glmmTMB)
+library(DHARMa)
+#dataset in Dryad 
+
+```
+
+Data set up
+```{r setup data, warning=FALSE, message = FALSE}
+dis_1 <-read.csv("~/Dropbox/POST DOC/PostDoc Project/Spring 2019/Research/Research/Disease_deep nursery/Frame Surveys/Data/FrameSurvey_Dec2019_wideformat_edit2.csv")
+
+setwd("~/Dropbox/POST DOC/PostDoc Project/Spring 2019/Research/Research/Disease_deep nursery/Frame Surveys/Data/")
+#if goes from dead to missing, change back to dead 
+library(data.table)
+```
+
+Make sure data in columns are consistently named 
+```{r data management}
+dis <- reshape2::melt(dis_1, id= c("Frame", "Column","Row","Genotype")) #value.name ="Coral_stat")
+colnames(dis)[5] <- "Date"
+colnames(dis)[6] <- "Coral_stat"
+
+#remove X from the dates
+dis$Date <-gsub("X","",dis$Date)
+
+#create unique IDs for each coral based on frame number and location on a frame
+dis$ID <- paste(dis$Frame, dis$Column, dis$Row)
+
+#remove Xs from data
+#dis$Date <- str_remove(dis$Date,"X")
+#remove leading or trailing white spaces
+dis$Coral_stat <- trimws(dis$Coral_stat)
+
+#Replace P with H
+p <- which(dis$Coral_stat == "P")
+dis[p,"Coral_stat"] <- "H"
+
+
+#Replace XS with X
+s <- which(dis$Coral_stat == "XS")
+dis[s,"Coral_stat"] <- "X"
+
+#Replace HR with H (Healty recovred should be just health)
+h <- which(dis$Coral_stat == "HR")
+dis[h,"Coral_stat"] <- "H"
+
+#replace "0" with O for missing
+o <- which(dis$Coral_stat == "0")
+dis[o,"Coral_stat"] <- "O"
+
+#replace OD with Dead
+d <- which(dis$Coral_stat == "OD")
+dis[d,"Coral_stat"] <- "D"
+
+#replace R for Recovered with Healthy
+e <- which(dis$Coral_stat == "R")
+dis[e,"Coral_stat"] <- "H"
+
+#replace diseased and recovered (XR) with X (disease)
+f <- which(dis$Coral_stat == "XR")
+dis[f,"Coral_stat"] <- "X"
+
+#replace recovered with disease with just disease
+g <- which(dis$Coral_stat == "RX")
+dis[g,"Coral_stat"] <- "X"
+
+#remove data from May 16 - not trustworthy
+dis <- dis[which(dis$Date != "2019.05.16"),]
+#remove missing corals (never present) and where there is no data
+dis <- dis[which(dis$Coral_stat != "O" & dis$Coral_stat != "NoData"),]
+```
+
+
+Genotype counts
+```{r genotype counts}
+counts_dis_g <- plyr::ddply(na.omit(dis), c("Date", "Genotype","Frame","Coral_stat"), summarize,
+      count = length(Coral_stat))
+
+```
+
+Including zeroes for other health categories  
+```{r include zeroes}
+#put all data longwise 
+counts_dis_g <- as.data.table(counts_dis_g)
+dim(counts_dis_g)
+counts_cast <- dcast.data.table(counts_dis_g, Date+Genotype+Frame~Coral_stat, value.var = "count")
+
+counts_cast <- counts_cast %>% mutate_all(~replace(., is.na(.), 0))
+dim(counts_cast)
+```
+
+Melt data 
+```{r melt data}
+counts_cast_melt <- melt(data = counts_cast, id.vars = c("Date","Frame","Genotype"))
+colnames(counts_cast_melt)[4] <- "Coral_stat"
+colnames(counts_cast_melt)[5] <- "count"
+
+```
+Labeling single and mixed genotype frames
+```{r single mixed genotype label}
+library(data.table)
+frame <- data.table(unique(counts_cast_melt$Frame))
+colnames(frame)<- "Frame"
+frame$sing_mix <- ifelse(frame$Frame > 17, "mixed","single")
+s <- which(frame$Frame == "1207")
+frame[s,"sing_mix"] <- "single"
+w <- which(frame$Frame == "1279")
+frame[w,"sing_mix"] <- "single"
+
+
+```
+
+Counts across all of the frames and genotypes
+```{r setting up data}
+#count number of corals in a health category - this sums the number of corals over all health categories on a frame to get the total number of corals on a frame
+
+counts_fr <- ddply(counts_cast_melt, c("Date", "Frame"), summarize,       countf = sum(count))
+
+#for each frame, wheter it's a single or mixed genotype
+singmixf <- merge(frame, counts_fr)
+
+#total number of corals on single or mixed frames at each date
+total.per <- ddply(singmixf, c("Date","sing_mix"), summarize, 
+      total = sum(countf))
+
+#total number of frames 
+total.f <- ddply(singmixf, c("Date","sing_mix"), summarize, 
+      total = length(Frame))
+#12 mixed frames
+#18 single frames 
+
+#432 single corals
+#218 mixed
+```
+
+Calculation of proportion of health statuses on a frame including zeroes
+```{r health cat proportion}
+
+counts_all_singmix <- merge(counts_cast_melt, singmixf, by = c("Frame", "Date"))
+dim(counts_all_singmix)
+
+
+counts_all_of_frame <- ddply(counts_all_singmix, c("Date", "Frame","sing_mix","countf","Coral_stat"), summarize,       
+                  count_all = sum(count))
+dim(counts_all_of_frame)
+#average over all frames
+sum_all_counts <- Rmisc::summarySE(counts_all_of_frame, measurevar = "count_all", groupvars = c("Date","Coral_stat","sing_mix"))
+
+
+counts_all_of_frame$prop <- counts_all_of_frame$count_all/counts_all_of_frame$countf
+
+#average of proportion in each health category per frame 
+sum_all <- Rmisc::summarySE(counts_all_of_frame, measurevar = "prop", groupvars = c("Date","Coral_stat","sing_mix"))
+
+
+```
+
+
+Figure 2: Plot of Disease for all corals across the nursery 
+
+```{r Figure 2 - Single vs mixed All}
+
+sum_all2 <- subset(sum_all, Date != "2019.02.01")
+sum_all2$Date2 <- gsub("[.]", "/", sum_all2$Date)
+sum_all2$Date3 <- as.Date(sum_all2$Date2)
+
+#### Used in Figure 2 below ####
+sing_mix_all  <- ggplot(sum_all2[which(sum_all2$Coral_stat=="X"),], aes(x = Date3, y = prop, group =sing_mix)) + geom_point(aes(fill = sing_mix), pch = 21, color = "black",size = 3, alpha= 0.75, position = position_dodge(width = 0.5)) + geom_errorbar(aes(ymax = prop+se, ymin = prop-se), position = position_dodge(width = 0.5)) + ylab("Disease Prevalance") + theme_bw() + scale_fill_manual(values = c("darkorchid4","gold"), labels = c("mixed", "single"), name = "Diversity") + theme(axis.text.x = element_text(angle = 90),panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom") + xlab("Date")
+
+```
+
+
+Disease-only data 
+```{r disease and dead data}
+disease <- counts_all_of_frame[which(counts_all_of_frame$Coral_stat == "X"),]
+dim(disease)
+dead <- counts_all_of_frame[which(counts_all_of_frame$Coral_stat == "D"),]
+
+
+total.disease.counts <- ddply(disease, c("Date","sing_mix"), summarize, 
+sum.disease = sum(count_all), sum.all = sum(countf))
+
+total.dead.counts <- ddply(dead, c("Date","sing_mix"), summarize, sum.disease = sum(count_all), sum.all = sum(countf))
+
+
+#create factors and turn dates into date data type
+disease$Frame <- as.factor(disease$Frame)
+disease$Date2 <- gsub("[.]", "/", disease$Date)
+disease$Date3 <- as.Date(disease$Date2)
+#disease$Date2 <- as.numeric(disease$Date)
+
+#includind a polynomial
+x2 <-poly(disease$Date3,2)
+```
+
+
+Model 1 analysis (all data)
+```{r set up for Model 1 analysis}
+disease <- counts_all_of_frame[which(counts_all_of_frame$Coral_stat == "X"),]
+disease$Frame <- as.factor(disease$Frame)
+disease$Date2 <- gsub("[.]", "/", disease$Date)
+disease$Date3 <- as.Date(disease$Date2)
+
+#include density
+Frame_area <- read.csv("~/Dropbox/POST DOC/PostDoc Project/Spring 2019/Research/Research/Disease_deep nursery/Frame Surveys/Data/Frame_area.csv")
+
+#dim(disease)
+#dim(disease_dens)
+disease_dens <- merge(disease, Frame_area, by = "Frame")
+disease_dens$density <- disease_dens$countf/disease_dens$Area
+disease_dens$density_rescale <- reshape::rescaler(to = c(0,1), x = disease_dens$density)
+```
+
+Model 1: Binomial analysis
+```{r binomial Model 1}
+x2 <-poly(disease_dens$Date3,2)
+
+library(glmmTMB)
+glmmtb_alldat <- glmmTMB(cbind(count_all, countf-count_all) ~ sing_mix*x2+density + (1|Frame), family = binomial, data= disease_dens)
+
+```
+
+Check Model 1 residuals
+```{r binomial residual glmtbb}
+library(DHARMa, quietly = TRUE)
+glmtb_resid1 <- simulateResiduals(glmmtb_alldat)
+testOutliers(glmtb_resid1, type = "bootstrap")
+plot(glmtb_resid1)
+```
+
+Summary of Model 1 as a table
+```{r table for glmmtb}
+
+summary(glmmtb_alldat)
+knitr::kable(car::Anova(glmmtb_alldat))
+```
+
+Density information
+```{r counts information, results = FALSE}
+disease_dens %>%
+   dplyr::group_by(Date,sing_mix)%>%
+  dplyr::summarize(total = sum(count_all))
+```
+
+Figure 1 data summary
+```{r Figure 1: data summary}
+sum_all2 <- Rmisc::summarySE(counts_all_of_frame, measurevar = "prop", groupvars = c("Date","Coral_stat"))
+
+sum_all2$Date2 <- gsub("[.]", "/", sum_all2$Date)
+sum_all2$Date3 <- as.Date(sum_all2$Date2)
+
+
+```
+
+Figure 1 Plot 
+```{r Figure 1 plot}
+#### Figure 1 ####
+
+ggplot(sum_all2[which(sum_all2$Date!="2019.02.01"),], aes(x = Date3, y = prop, group = Coral_stat)) + geom_point(aes(fill = Coral_stat),color = "black", pch = 21, size = 3) + theme_bw() + geom_errorbar(aes(ymax = prop+se, ymin = prop-se)) + ylab("Proportion of health status over time")  + theme(axis.text.x = element_text(angle = 90), panel.grid.minor = element_blank(), panel.grid.major = element_blank()) + scale_fill_manual(values = c("black","orange", "gray"), name = "Coral Health", labels = c("Dead","Healthy", "Disease")) + xlab("Date")
+
+```
+
+Figure S2: Health statuses across all frames set up
+```{r Figure S2: Health statuses across all frames}
+#### Supplement - all Frames
+sum_all3 <- Rmisc::summarySE(counts_all_of_frame, measurevar = "prop", groupvars = c("Date","Coral_stat", "Frame", "sing_mix"),na.rm = T)
+
+sum_all3$Date2 <- gsub("[.]", "/", sum_all3$Date)
+sum_all3$Date3 <- as.Date(sum_all3$Date2)
+
+sum_all3$Frame <- factor(sum_all3$Frame, levels = c("1235","1231","14","9","1237","7","5","1221","1219","12","11","1251","1201","1217","13","10","1209","6","4","3","8","1279","1207","16","15","1107","1","2","1295","1296"))
+```
+
+Figure S2: Health statuses across all frames
+```{r Figure S2 Supplement Plot: All frames, out.width="50%"}
+ggplot(sum_all3[which(sum_all3$Date!="2019.02.01"),], aes(x = Date3, y = prop, group = Coral_stat)) + theme_bw() + geom_errorbar(aes(ymax = prop+se, ymin = prop-se)) + ylab("Proportion of health status over time")  + theme(text = element_text(size = 20), axis.text.x = element_text(size = 16, angle = 90), panel.grid.major = element_blank(), panel.grid.minor = element_blank(), strip.background = element_rect(color = "black", fill ="white")) + scale_color_manual(values = c("black","orange", "gray"), name = "Coral Health",labels = c("Dead","Healthy","Disease")) + xlab("Date") + facet_wrap(~Frame+sing_mix) + geom_line(aes(color = Coral_stat), size = 1)+ geom_point(aes(color = Coral_stat), size = 1)
+
+```
+
+
+Including genotype information 
+calculates the proportion of disease within a genotype on a frame
+```{r proportions including genotypes - genotypes on single and mixed frames}
+counts_cast_melt <- melt(data = counts_cast, id.vars = c("Date","Frame","Genotype"))
+
+colnames(counts_cast_melt)[4] <- "Coral_stat"
+colnames(counts_cast_melt)[5] <- "count"
+
+counts_cast_melt <- subset(counts_cast_melt, Coral_stat == "X" | Coral_stat == "H" | Coral_stat == "D")
+dim(counts_cast_melt)
+#Blue
+B <- counts_cast_melt[which(counts_cast_melt$Genotype == "B"),]
+counts_fr <- ddply(B, c("Date", "Frame"), summarize,      
+                   countf = sum(count))
+Bf <- merge(B, counts_fr, by = c("Date","Frame"))
+
+Bf$prop <- Bf$count/Bf$countf            
+
+genotypefunc <- function(Gen){
+   Gent <- counts_cast_melt[which(counts_cast_melt$Genotype == Gen),]
+   counts_fr <- ddply(Gent, c("Date", "Frame"), summarize,      
+                   countf = sum(count))
+Gentf <- merge(Gent, counts_fr, by = c("Date","Frame"))
+Gentf$prop <- Gentf$count/Gentf$countf            
+Gentf <- as.data.frame(Gentf)
+}
+
+Rf <- genotypefunc(Gen = "R")
+dim(Rf)
+Kf <- genotypefunc(Gen = "K")
+dim(Kf)
+Gf <- genotypefunc(Gen = "G")
+dim(Gf)
+Yf <- genotypefunc(Gen = "Y")
+dim(Yf)
+
+#combine together
+GenRYGBK <- rbind(Rf, Kf, Bf, Gf, Yf)
+dim(GenRYGBK)
+```
+
+Summarizing the data with genotypes 
+```{r proportions including genotypes}
+#merge with single mix
+
+colnames(singmixf)[4] <- "count_all"
+GenRYGBK_sm <- merge(singmixf, GenRYGBK, by = c("Date","Frame"))
+#dimension check
+dim(singmixf)
+dim(GenRYGBK)
+dim(GenRYGBK_sm) #summarize - just B, K, R, Y, G
+
+
+sumgen1 <- Rmisc::summarySE(GenRYGBK_sm, measurevar = c("prop"), groupvars = c("Date","Genotype","sing_mix", "Coral_stat"))
+
+sum_onlygrybk <- Rmisc::summarySE(GenRYGBK_sm, measurevar = c("prop"), groupvars = c("Date","sing_mix", "Coral_stat"))
+
+```
+
+
+Model 2: Including genotypes in understanding disease prevalence
+```{r Model 2: disease with only genotypes on both frames}
+disease2 <- GenRYGBK_sm[which(GenRYGBK_sm$Coral_stat == "X"),]
+disease2$Frame <- as.factor(disease2$Frame)
+disease2$sing_mix <- as.factor(disease2$sing_mix)
+disease2$Genotype <- as.factor(disease2$Genotype)
+
+disease2$Date2 <- gsub("[.]", "/", disease2$Date)
+disease2$Date3 <- as.Date(disease2$Date2)
+#between genotype and single mixed
+disease2_dens <- merge(Frame_area, disease2, by = "Frame")
+dim(disease2)
+dim(disease2_dens)
+disease2_dens$density <- disease2_dens$countf/disease2_dens$Area
+library(stats)
+x2 <-poly(disease2_dens$Date3,2)
+```
+
+
+```{r Model 2: binomial  including genotypes glmmTMB}
+library("glmmTMB")
+
+glmmtb_all <- 
+glmmTMB(cbind(count, countf-count) ~ sing_mix*x2*Genotype + density + (1|Frame), family = binomial, data= disease2_dens)
+
+```
+
+
+```{r Model 2 binomial  including genotypes glmmTMB summary}
+summary(glmmtb_all)
+#anova(glm3a)
+#car::Anova(glmmtb_all, type = "III")
+```
+
+Model 2 summary table
+```{r Model 2 table}
+knitr::kable(car::Anova(glmmtb_all, type = "III"))
+```
+
+
+```{r Model 2 binomial  checking residuals}
+library(DHARMa, quietly = TRUE)
+glmtb_resid <- simulateResiduals(glmmtb_all)
+testOutliers(glmtb_resid, type = "bootstrap")
+plot(glmtb_resid)
+#no significant outliers
+```
+
+
+Figure 2
+```{r single mix plot for Fig2}
+
+disease2 <- disease2[which(disease2$Date!= "2019.02.01"),]
+sum_gen_all_sing_mix2 <- Rmisc::summarySE(disease2, measurevar = c("prop"), groupvars = c("Date3","sing_mix"), na.rm = T)
+
+#summary for Figure 2
+sum_gybrk_sing_mix <- Rmisc::summarySE(na.omit(disease2), measurevar = c("prop"), groupvars = c("Date","Date3","sing_mix","Genotype"))
+
+#summary for SFig 3
+sumall_gybrk_sing_mix <- Rmisc::summarySE(na.omit(GenRYGBK_sm), measurevar = c("prop"), groupvars = c("Date","sing_mix","Genotype","Coral_stat"))
+
+
+```
+
+Supplement Figure S3: Proportion of health status by genotypes on both single and mixed frames
+
+```{r Supplemental figure Genotypes by health status}
+
+sumall_gybrk_sing_mix$Date2 <- gsub("[.]", "/", sumall_gybrk_sing_mix$Date)
+sumall_gybrk_sing_mix$Date3 <- as.Date(sumall_gybrk_sing_mix$Date2)
+                          
+sumall_gybrk_sing_mix$Coral_stat <- factor(sumall_gybrk_sing_mix$Coral_stat, levels = c("H","X","D"), labels = c("Healthy","Disease","Dead"))
+
+
+ggplot(sumall_gybrk_sing_mix[which(sumall_gybrk_sing_mix$Date != "2019.02.01"),], aes(x = Date3, y = prop, group =sing_mix))  + geom_errorbar(aes(ymax = prop+se, ymin = prop-se), position = position_dodge(width = 0.5), color = "gray") + ylab("Proportion of Corals") + theme_bw() + scale_fill_manual(values = c("darkorchid4","gold"), labels = c("mixed", "single"), name = "Diversity")+ theme(text = element_text(size = 16), axis.text.x = element_text(angle = 90),panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom")+ geom_point(aes(fill = sing_mix), pch = 21, color = "black",size = 3, alpha= 0.75, position = position_dodge(width = 0.5)) + xlab("Date") + facet_grid(vars(Genotype), vars(Coral_stat))
+
+```
+
+Individual genotype plots for disease prevalence
+```{r Genotype individual plots}
+plot.Y <- ggplot(sum_gybrk_sing_mix[which(sum_gybrk_sing_mix$Genotype=="Y"),], aes(x = Date3, y = prop, group =sing_mix))  + geom_errorbar(aes(ymax = prop+se, ymin = prop-se), position = position_dodge(width = 0.5), color = "gray") + ylab("Disease Prevalance") + theme_bw() + scale_fill_manual(values = c("darkorchid4","gold"), labels = c("mixed", "single"), name = "Diversity") + theme(axis.text.x = element_text(angle = 90),panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom")+ geom_point(aes(fill = sing_mix), pch = 21, color = "black",size = 3, alpha= 0.75, position = position_dodge(width = 0.5)) + xlab("Date") + facet_grid(~Genotype) + lims(y = c(0,0.85))
+
+plot.G <- ggplot(sum_gybrk_sing_mix[which(sum_gybrk_sing_mix$Genotype=="G"),], aes(x = Date3, y = prop, group =sing_mix))  + geom_errorbar(aes(ymax = prop+se, ymin = prop-se), position = position_dodge(width = 0.5), color = "gray") + ylab("Disease Prevalance") + theme_bw() + scale_fill_manual(values = c("darkorchid4","gold"), labels = c("mixed", "single"), name = "Diversity") + theme(axis.text.x = element_text(angle = 90),panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom")+ geom_point(aes(fill = sing_mix), pch = 21, color = "black",size = 3, alpha= 0.75, position = position_dodge(width = 0.5)) + xlab("Date") + facet_grid(~Genotype)+ lims(y = c(0,0.85))
+
+plot.R <- ggplot(sum_gybrk_sing_mix[which(sum_gybrk_sing_mix$Genotype=="R"),], aes(x = Date3, y = prop, group =sing_mix))  + geom_errorbar(aes(ymax = prop+se, ymin = prop-se), position = position_dodge(width = 0.5), color = "gray") + ylab("Disease Prevalance") + theme_bw() + scale_fill_manual(values = c("darkorchid4","gold"), labels = c("mixed", "single"), name = "Diversity") + theme(axis.text.x = element_text(angle = 90),panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom")+ geom_point(aes(fill = sing_mix), pch = 21, color = "black",size = 3, alpha= 0.75, position = position_dodge(width = 0.5)) + xlab("Date") + facet_grid(~Genotype)+ lims(y = c(0,0.85))
+
+plot.B <- ggplot(sum_gybrk_sing_mix[which(sum_gybrk_sing_mix$Genotype=="B"),], aes(x = Date3, y = prop, group =sing_mix))  + geom_errorbar(aes(ymax = prop+se, ymin = prop-se), position = position_dodge(width = 0.5), color = "gray") + ylab("Disease Prevalance") + theme_bw() + scale_fill_manual(values = c("darkorchid4","gold"), labels = c("mixed", "single"), name = "Diversity") + theme(axis.text.x = element_text(angle = 90),panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom")+ geom_point(aes(fill = sing_mix), pch = 21, color = "black",size = 3, alpha= 0.75, position = position_dodge(width = 0.5)) + xlab("Date") + facet_grid(~Genotype)+ lims(y = c(0,0.85))
+
+plot.K <- ggplot(sum_gybrk_sing_mix[which(sum_gybrk_sing_mix$Genotype=="K"),], aes(x = Date3, y = prop, group =sing_mix))  + geom_errorbar(aes(ymax = prop+se, ymin = prop-se), position = position_dodge(width = 0.5), color = "gray") + ylab("Disease Prevalance") + theme_bw() + scale_fill_manual(values = c("darkorchid4","gold"), labels = c("mixed", "single"), name = "Diversity") + theme(axis.text.x = element_text(angle = 90),panel.grid.major = element_blank(), panel.grid.minor = element_blank(), legend.position = "bottom")+ geom_point(aes(fill = sing_mix), pch = 21, color = "black",size = 3, alpha= 0.75, position = position_dodge(width = 0.5)) + xlab("Date") + facet_grid(~Genotype)+ lims(y = c(0,0.85))
+
+```
+
+Figure 2
+```{r Figure 2 whole plot}
+library(patchwork)
+
+(sing_mix_all + plot_layout(widths = 25))/(plot.G + plot.Y + plot.R + plot.B + plot.K
++ plot_layout(nrow = 1, widths = 25))/plot_layout(guides = "collect") & theme(legend.position = "bottom") & plot_annotation(tag_levels = 'a') 
+
+```
+
+
+Supplemental Figure 1: Temperature 
+```{r temperature}
+tempcsv <- read.csv("~/Dropbox/POST DOC/PostDoc Project/Spring 2019/Research/Research/Disease_deep nursery/Microbial Sampling_wholeframes/Temperature/tempcsv.csv", header=FALSE, comment.char="#")
+
+temp <- tempcsv[,2:3]
+colnames(temp) <- c("Date_time","temp")
+temp <- separate(temp, "Date_time",c("Date","time")," ")
+temp$Date <- as.Date(temp$Date, format = "%m/%d/%y")
+temp2 <- subset(temp, Date < "2019-08-19")
+temp.sum <- summarySE(temp2, measurevar = "temp", groupvars = c("Date"))
+
+martha_r <- read.csv("~/Dropbox/POST DOC/PostDoc Project/Spring 2019/Research/Research/Disease_deep nursery/Microbial Sampling_wholeframes/Temperature/martha_r.csv")
+
+temp3 <-martha_r
+colnames(temp3) <- c("Date_time","temp")
+temp4 <- separate(temp3, "Date_time",c("Date","time")," ")
+str(temp4)
+
+temp4$Date <- as.Date(temp4$Date, format = "%m/%d/%y")
+
+temp5 <- subset(temp4, Date > "2019-05-19" & Date < "2019-08-10")
+temp.sum2 <- summarySE(temp5, measurevar = "temp", groupvars = c("Date"))
+
+dim(temp.sum2)
+temp.sum2$Loc <- "Martha"
+temp.sum$Loc <- "Deep"
+
+temp.both <- data.table(rbind(temp.sum, temp.sum2))
+temp.both$tempC <- (temp.both$temp - 32)* (5/9)
+templab <- "Temperature (°C)"
+
+templot <- ggplot(temp.both, aes(x = Date, y = tempC)) + geom_point(size = 3, fill = "black", color = "black", pch = 21) + scale_x_date(date_labels = "%m-%d",date_breaks = "10 day" ) + ylab(templab) + theme(text = element_text(size = 16)) + theme_bw() + geom_line()
+```
+
+
+
+
+```{r temperature plots}
+
+library(cowplot)
+sum_all2_a <- select(sum_all2, Coral_stat, N, prop, se, Date3)
+colnames(sum_all2_a)[5] <- "Date"
+temp.dis <- merge(sum_all2_a, temp.both, by = "Date")
+
+tempdeadp <- ggplot(temp.dis[which(temp.dis$Coral_stat == "D"),], aes(x = tempC,  y = prop)) + geom_point(size = 3) + theme_bw() + xlab(templab) + ylab("Proportion of Dead Corals") + geom_smooth(se = F, col = "black")
+
+tempdisp <-ggplot(temp.dis[which(temp.dis$Coral_stat == "X"),], aes(x = tempC,  y = prop)) + geom_point(size = 3) + theme_bw() + xlab(templab) + ylab("Proportion of Diseased Corals") + geom_smooth(se = F, col = "gray")
+  
+healthtemp <- ggplot(temp.dis, aes(x = tempC,  y = prop, group= Coral_stat)) + geom_point(size = 3, aes(color = Coral_stat)) + theme_bw() + xlab(templab) + ylab("Proportion of Corals") + geom_smooth(se = F, aes(color = Coral_stat), method = "lm")+ scale_color_manual(values = c("black","orange", "gray"), name = "Health", labels = c("Dead","Healthy", "Disease"))
+
+
+
+plot_grid(templot, healthtemp, labels = "auto")
+
+```
+
+
+
+```{r linear model temperature results}
+temp.prop.lm <- lm(prop~tempC*Coral_stat, data= temp.dis)
+summary(temp.prop.lm)
+plot(temp.prop.lm)
+car::Anova(temp.prop.lm, type = "III")
+coef(temp.prop.lm)
+```
+
+```{r linear models by health status}
+temp.prop.lmX <- lm(prop~tempC, data= temp.dis[which(temp.dis$Coral_stat == "X"),])
+temp.prop.lmD <- lm(prop~tempC, data= temp.dis[which(temp.dis$Coral_stat == "D"),])
+temp.prop.lmH <- lm(prop~tempC, data= temp.dis[which(temp.dis$Coral_stat == "H"),])
+
+summary(temp.prop.lmX)
+summary(temp.prop.lmD)
+summary(temp.prop.lmH)
+```
+
